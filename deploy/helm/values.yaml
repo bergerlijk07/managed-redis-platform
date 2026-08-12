@@ -1,0 +1,59 @@
+# Managed Redis Platform - Helm Values
+
+replicaCount: 3
+
+image:
+  repository: managed-redis-platform
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# Spring profiles
+springProfiles: production
+
+# Database
+database:
+  host: postgresql
+  port: 5432
+  name: managed_redis
+  existingSecret: db-credentials
+  secretKey: password
+
+# Observability
+observability:
+  metrics:
+    enabled: true
+    serviceMonitor: true
+  tracing:
+    enabled: true
+    endpoint: http://otel-collector:4317
+
+# Platform config
+platform:
+  reconciler:
+    intervalSeconds: 30
+  cloud:
+    provider: aws
+    region: us-east-1
+
+# Autoscaling
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Pod disruption budget
+podDisruptionBudget:
+  minAvailable: 2

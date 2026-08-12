@@ -1,0 +1,66 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: managed-redis-platform
+  datasource:
+    url: jdbc:h2:mem:redisplatform;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+# Platform Configuration
+platform:
+  reconciler:
+    interval-seconds: 30
+  cloud:
+    provider: aws
+    region: us-east-1
+    account-id: "123456789012"
+
+# Observability
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: managed-redis-platform
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    io.platform.redis: INFO
+    org.springframework: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId}] [%X{operationId}] %-5level %logger{36} - %msg%n"
+
+---
+# Production profile
+spring:
+  config:
+    activate:
+      on-profile: production
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:managed_redis}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
