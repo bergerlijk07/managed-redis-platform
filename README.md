@@ -17,10 +17,11 @@ The platform follows the **Kubernetes controller pattern**: observe actual state
 | Runtime | Java 21, Spring Boot 3.3 |
 | API | Spring Web MVC, Bean Validation |
 | Persistence | JPA/Hibernate, PostgreSQL (H2 for dev) |
+| Cloud | AWS SDK v2 (EC2, ElastiCache, Route53, Secrets Manager) |
 | Kubernetes | Fabric8 Kubernetes Client |
 | Observability | Micrometer, Prometheus, Logstash JSON |
 | Build | Maven, Docker multi-stage |
-| Deploy | Helm 3, Kubernetes |
+| Deploy | Terraform, Kubernetes |
 
 ## Quick Start
 
@@ -29,6 +30,8 @@ The platform follows the **Kubernetes controller pattern**: observe actual state
 - Java 21+
 - Maven 3.9+
 - Docker (optional, for containerized run)
+- AWS credentials configured (for production: IAM role, env vars, or `~/.aws/credentials`)
+- Access to a Kubernetes cluster (for production: EKS with kubeconfig or in-cluster service account)
 
 ### Run Locally (H2 in-memory DB)
 
@@ -178,8 +181,9 @@ src/main/java/io/platform/redis/
 │   ├── HAController.java                     # Failure detection + recovery
 │   ├── UpgradeController.java                # Rolling upgrades + rollback
 │   ├── CloudProviderAdapter.java             # Interface
-│   ├── cloud/AWSCloudProvider.java           # AWS implementation
-│   └── KubernetesOperatorService.java        # CRD management
+│   ├── cloud/
+│   │   └── AWSCloudProvider.java             # AWS SDK v2 (EC2, ElastiCache, Route53, SecretsManager)
+│   └── KubernetesOperatorService.java        # Fabric8 CRD management + namespace isolation
 ├── observability/
 │   ├── PlatformMetrics.java                  # Prometheus metrics
 │   └── CorrelationFilter.java                # Request tracing
@@ -215,6 +219,13 @@ src/main/java/io/platform/redis/
 | `PLATFORM_RECONCILER_INTERVAL_SECONDS` | 30 | Reconcile loop interval |
 | `PLATFORM_CLOUD_PROVIDER` | aws | Default cloud |
 | `PLATFORM_CLOUD_REGION` | us-east-1 | Default region |
+| `AWS_ACCOUNT_ID` | - | AWS account ID |
+| `AWS_VPC_CIDR` | 10.100.0.0/16 | VPC CIDR block for Redis networks |
+| `AWS_ROUTE53_ZONE_ID` | - | Route53 hosted zone for DNS records |
+| `AWS_DNS_SUFFIX` | redis.platform.internal | DNS suffix for Redis endpoints |
+| `K8S_MASTER_URL` | - | Kubernetes API server URL (auto-detected if in-cluster) |
+| `K8S_NAMESPACE` | default | Default Kubernetes namespace |
+| `KUBECONFIG_PATH` | - | Path to kubeconfig file (for out-of-cluster) |
 | `SPRING_PROFILES_ACTIVE` | default | `production` for JSON logs + PostgreSQL |
 
 ## Build & Deploy
@@ -242,12 +253,16 @@ docker run -p 8080:8080 \
   managed-redis-platform:1.0.0
 ```
 
-### Deploy to Kubernetes (Helm)
+### Deploy to Kubernetes (Terraform)
 
 ```bash
-helm install redis-platform deploy/helm/ \
-  --set database.host=postgresql.default.svc \
-  --set database.existingSecret=db-credentials
+cd deploy/terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your environment values
+
+terraform init
+terraform plan
+terraform apply
 ```
 
 ## Observability
@@ -307,9 +322,11 @@ redis_instances_degraded
 - [ ] Deploy with `replicas >= 3` and PodDisruptionBudget
 - [ ] Configure Prometheus + Grafana dashboards
 - [ ] Set up alerts for SLI breaches (provisioning rate, latency)
-- [ ] Wire real AWS SDK calls in `AWSCloudProvider`
-- [ ] Connect Fabric8 client to target EKS clusters
-- [ ] Set up CI/CD pipeline (build → test → push → helm upgrade)
+- [x] Wire real AWS SDK calls in `AWSCloudProvider` (EC2, ElastiCache, Route53, Secrets Manager)
+- [x] Connect Fabric8 client to target EKS clusters (CRD creation, namespace isolation)
+- [ ] Configure `AWS_ACCOUNT_ID`, `AWS_ROUTE53_ZONE_ID`, and AWS credentials
+- [ ] Set up `KUBECONFIG_PATH` or deploy in-cluster with proper ServiceAccount RBAC
+- [ ] Set up CI/CD pipeline (build → test → push → terraform apply)
 
 ## License
 

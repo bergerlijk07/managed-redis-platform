@@ -7,7 +7,7 @@ This platform provides managed Redis-as-a-Service built on Kubernetes. Customers
 that intent. The system follows the Kubernetes controller pattern at the platform level:
 observe actual state, compare to desired state, reconcile the difference.
 
-**Technology Stack:** Java 21, Spring Boot 3.3, JPA/Hibernate, Micrometer, Fabric8 Kubernetes Client
+**Technology Stack:** Java 21, Spring Boot 3.3, JPA/Hibernate, AWS SDK v2 (EC2, ElastiCache, Route53, Secrets Manager), Fabric8 Kubernetes Client, Micrometer
 
 ---
 
@@ -80,11 +80,11 @@ observe actual state, compare to desired state, reconcile the difference.
            ▼                   ▼
     ┌──────────────┐   ┌───────────────┐
     │  AWS APIs    │   │  EKS Cluster  │
-    │ VPC/EBS/IAM  │   │              │
-    │ Route53/KMS  │   │ ManagedRedis │
-    └──────────────┘   │   Operator   │
-                       │      │        │
-                       │  StatefulSets │
+    │ EC2 (VPC/SG) │   │              │
+    │ ElastiCache  │   │ ManagedRedis │
+    │ Route53 (DNS)│   │   Operator   │
+    │ SecretsManager│  │      │        │
+    └──────────────┘   │  StatefulSets │
                        │  Services     │
                        │  PVCs/PDBs    │
                        └───────────────┘
@@ -228,17 +228,62 @@ Interface-based design — express WHAT you need, not HOW:
 
 ```java
 public interface CloudProviderAdapter {
-    void provisionNetwork(RedisInstance instance);   // AWS → PrivateLink
-    void provisionStorage(RedisInstance instance);   // AWS → gp3 EBS
-    void deployRedis(RedisInstance instance);        // AWS → EKS CRD
-    void configureRedis(RedisInstance instance);     // AWS → ACM + Route53
-    boolean checkHealth(RedisInstance instance);
+    void provisionNetwork(RedisInstance instance);   // AWS → VPC + subnets + SG
+    void provisionStorage(RedisInstance instance);   // AWS → ElastiCache snapshots
+    void deployRedis(RedisInstance instance);        // AWS → ElastiCache replication group
+    void configureRedis(RedisInstance instance);     // AWS → Route53 DNS + endpoint
+    boolean checkHealth(RedisInstance instance);     // AWS → replication group status
 }
 ```
 
+**AWS Implementation (`AWSCloudProvider`)** uses AWS SDK v2:
+
+| Method | AWS Services | What It Does |
+|--------|-------------|--------------|
+| `provisionNetwork` | EC2 | Create/reuse VPC, subnets across AZs, security group (port 6379), ElastiCache subnet group |
+| `provisionStorage` | ElastiCache | Configure snapshot retention (ElastiCache manages storage internally) |
+| `deployRedis` | ElastiCache, Secrets Manager | Create replication group with sharding, multi-AZ, encryption, auth token |
+| `configureRedis` | Route53 | Read endpoint from replication group, create CNAME DNS record |
+| `checkHealth` | ElastiCache | Query replication group status, verify node counts |
+| `deleteRedis` | ElastiCache, Secrets Manager | Delete replication group (with final snapshot), remove auth token |
+| `deleteNetwork` | EC2, ElastiCache | Delete subnet group, security group |
+
+All methods are **idempotent** — they check for existing resources via tags before creating.
+
 Adding GCP support means implementing a `GCPCloudProvider` — no changes to core logic.
 
-### 4.7 Reconciliation Controller
+### 4.7 Kubernetes Operator Service
+
+**Package:** `io.platform.redis.service.KubernetesOperatorService`
+
+Manages ManagedRedis CRDs on target EKS clusters via Fabric8 Kubernetes Client:
+
+```
+Control Plane                              Target EKS Cluster
+     │                                          │
+     ├── ensureNamespace("tenant-acme-corp") ──→│ Creates namespace + NetworkPolicy
+     │                                          │
+     ├── createManagedRedis(instance) ─────────→│ Creates ManagedRedis CRD
+     │                                          │   ├── spec.shards: 3
+     │                                          │   ├── spec.replicasPerShard: 1
+     │                                          │   ├── spec.security.tls: true
+     │                                          │   └── spec.persistence.enabled: true
+     │                                          │
+     ├── getStatus(instance) ←─────────────────│ Reads .status from CRD
+     │                                          │   ├── phase: "Ready"
+     │                                          │   ├── readyShards: 3
+     │                                          │   └── endpoint: "redis-xxx..."
+     │                                          │
+     └── deleteManagedRedis(instance) ─────────→│ Deletes CRD (operator cleans up)
+```
+
+**Key features:**
+- **Tenant isolation:** Each tenant gets a dedicated namespace with default-deny NetworkPolicy
+- **Idempotent operations:** Checks for existing resources before creating
+- **Flexible auth:** Supports kubeconfig file, in-cluster ServiceAccount, or explicit master URL
+- **CRD-based:** Uses `GenericKubernetesResource` for the `platform.redis.io/v1 ManagedRedis` CRD
+
+### 4.8 Reconciliation Controller
 
 **Package:** `io.platform.redis.service.ReconciliationController`
 
@@ -262,7 +307,7 @@ This handles:
 
 **The reconciler never stops.** Even after provisioning completes, it continuously monitors for drift.
 
-### 4.8 HA Controller
+### 4.9 HA Controller
 
 **Package:** `io.platform.redis.service.HAController`
 
@@ -277,7 +322,7 @@ Failure detection with automated response matrix:
 | AZ failure | Multi-AZ health | Failover to surviving AZ | 2min | ✓ |
 | Storage I/O | Error monitoring | Alert + manual replace | 10min | ✗ |
 
-### 4.9 Upgrade Controller
+### 4.10 Upgrade Controller
 
 **Package:** `io.platform.redis.service.UpgradeController`
 
@@ -394,8 +439,8 @@ Wave 4: Complete (100%)
 ## 7. Project Structure
 
 ```
-managed-redis-platform-java/
-├── pom.xml                                    # Spring Boot 3.3, Java 21
+managed-redis-platform/
+├── pom.xml                                    # Spring Boot 3.3, Java 21, AWS SDK v2, Fabric8
 ├── Dockerfile                                 # Multi-stage (temurin:21)
 ├── src/main/java/io/platform/redis/
 │   ├── ManagedRedisPlatformApplication.java   # Entry point
@@ -428,8 +473,8 @@ managed-redis-platform-java/
 │   │   ├── ReconciliationController.java     # The control loop
 │   │   ├── CloudProviderAdapter.java         # Interface
 │   │   ├── cloud/
-│   │   │   └── AWSCloudProvider.java         # AWS implementation
-│   │   ├── KubernetesOperatorService.java    # CRD management
+│   │   │   └── AWSCloudProvider.java         # AWS SDK v2 (EC2, ElastiCache, Route53, SecretsManager)
+│   │   ├── KubernetesOperatorService.java    # Fabric8: CRD lifecycle + namespace isolation
 │   │   ├── HAController.java                 # Failure detection
 │   │   └── UpgradeController.java            # Rolling upgrades
 │   ├── observability/
@@ -438,14 +483,14 @@ managed-redis-platform-java/
 │   └── exception/
 │       └── PolicyViolationException.java
 ├── src/main/resources/
-│   ├── application.yml                       # Config (H2 dev, PG prod)
+│   ├── application.yml                       # Config (H2 dev, PG prod, AWS, K8s)
 │   └── logback-spring.xml                    # Structured JSON logging
 └── deploy/
-    └── helm/
-        ├── Chart.yaml
-        ├── values.yaml
-        └── templates/
-            └── deployment.yaml               # K8s deployment + service + PDB
+    └── terraform/
+        ├── main.tf                           # Deployment, Service, ServiceAccount, PDB
+        ├── variables.tf                      # All configurable inputs
+        ├── outputs.tf                        # Deployment/Service names, ClusterIP
+        └── terraform.tfvars.example          # Example configuration
 ```
 
 ---
@@ -480,18 +525,23 @@ managed-redis-platform-java/
 ## 9. Running the Platform
 
 ```bash
-# Development (H2 in-memory DB)
-./mvnw spring-boot:run
+# Development (H2 in-memory DB, no AWS/K8s needed)
+mvn spring-boot:run
 
 # Build
-./mvnw clean package -DskipTests
+mvn clean package -DskipTests
 
 # Docker
 docker build -t managed-redis-platform:1.0.0 .
 docker run -p 8080:8080 managed-redis-platform:1.0.0
 
-# Kubernetes (Helm)
-helm install redis-platform deploy/helm/
+# Kubernetes (Terraform)
+cd deploy/terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your environment values
+terraform init
+terraform plan
+terraform apply
 
 # Test the API
 curl -X POST http://localhost:8080/v1/redis-instances \
@@ -518,6 +568,27 @@ curl http://localhost:8080/v1/operations/op-xxxxxxxx
 curl -H "X-Tenant-ID: acme-corp" http://localhost:8080/v1/redis-instances
 ```
 
+### Environment Variables for Production
+
+```bash
+# AWS (required for real provisioning)
+export AWS_ACCOUNT_ID=123456789012
+export AWS_VPC_CIDR=10.100.0.0/16
+export AWS_ROUTE53_ZONE_ID=Z1234567890ABC
+export AWS_DNS_SUFFIX=redis.platform.internal
+# AWS credentials via env vars, IAM role, or ~/.aws/credentials
+
+# Kubernetes (auto-detected if running in-cluster)
+export K8S_MASTER_URL=https://eks-cluster.us-east-1.eks.amazonaws.com
+export KUBECONFIG_PATH=/path/to/kubeconfig
+
+# Database
+export SPRING_PROFILES_ACTIVE=production
+export DB_HOST=postgres.example.com
+export DB_USERNAME=platform
+export DB_PASSWORD=secret
+```
+
 ---
 
 ## 10. Production Considerations
@@ -528,7 +599,11 @@ curl -H "X-Tenant-ID: acme-corp" http://localhost:8080/v1/redis-instances
 | **Authentication** | JWT via API Gateway or Spring Security OAuth2 |
 | **Multi-tenancy** | Row-level filtering via `tenantId` on all queries |
 | **Rate limiting** | API Gateway or Spring Cloud Gateway |
-| **Secrets** | AWS Secrets Manager / HashiCorp Vault |
-| **CI/CD** | GitHub Actions → build → test → push image → Helm upgrade |
+| **Secrets** | AWS Secrets Manager (auth tokens auto-managed by platform) |
+| **Cloud infra** | AWS SDK v2: EC2 (VPC/SG), ElastiCache (Redis), Route53 (DNS), Secrets Manager |
+| **K8s operator** | Fabric8 client creates ManagedRedis CRDs; operator on EKS reconciles to StatefulSets |
+| **Tenant isolation** | Separate K8s namespaces + NetworkPolicy per tenant (auto-created) |
+| **CI/CD** | GitHub Actions → build → test → push image → `terraform apply` |
+| **Deploy** | Terraform (deploy/terraform/) manages K8s Deployment, Service, PDB |
 | **Scaling** | HPA on CPU; control plane is stateless (DB is the state) |
 | **DR** | Multi-region PostgreSQL with read replicas; active-passive failover |

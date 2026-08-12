@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and adjust values for your environment
+
+namespace    = "default"
+release_name = "redis-platform"
+
+# Image
+image_repository = "managed-redis-platform"
+image_tag        = "1.0.0"
+
+# Deployment
+replica_count   = 3
+spring_profiles = "production"
+
+# Database
+database_host            = "postgresql.default.svc"
+database_existing_secret = "db-credentials"
+
+# Platform
+reconciler_interval_seconds = 30
+cloud_provider              = "aws"
+cloud_region                = "us-east-1"
