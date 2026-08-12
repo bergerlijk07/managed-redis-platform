@@ -130,6 +130,35 @@ public class KubernetesOperatorService {
     }
 
     /**
+     * Updates the ManagedRedis CRD spec for scaling or configuration changes.
+     * The operator on the cluster will reconcile the changes (e.g., resize StatefulSets,
+     * update ConfigMaps, roll pods).
+     */
+    public void updateManagedRedis(RedisInstance instance) {
+        String namespace = tenantNamespace(instance.getTenantId());
+
+        GenericKubernetesResource existing = client.genericKubernetesResources(crdContext)
+                .inNamespace(namespace)
+                .withName(instance.getId())
+                .get();
+
+        if (existing == null) {
+            log.warn("ManagedRedis CRD not found for update, creating: {}/{}", namespace, instance.getId());
+            createManagedRedis(instance);
+            return;
+        }
+
+        GenericKubernetesResource updated = buildCrdResource(instance, namespace);
+
+        client.genericKubernetesResources(crdContext)
+                .inNamespace(namespace)
+                .withName(instance.getId())
+                .patch(updated);
+
+        log.info("ManagedRedis CRD updated for scaling/modification: {}/{}", namespace, instance.getId());
+    }
+
+    /**
      * Deletes the ManagedRedis CRD (operator handles cleanup of child resources).
      */
     public void deleteManagedRedis(RedisInstance instance) {

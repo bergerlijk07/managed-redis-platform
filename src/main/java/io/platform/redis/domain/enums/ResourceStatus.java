@@ -7,6 +7,8 @@ public enum ResourceStatus {
     CONFIGURING,
     READY,
     DEGRADED,
+    SCALING,
+    MODIFYING,
     UPGRADING,
     DELETING,
     DELETED,

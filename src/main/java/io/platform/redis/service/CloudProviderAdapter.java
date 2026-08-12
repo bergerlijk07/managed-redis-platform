@@ -27,6 +27,18 @@ public interface CloudProviderAdapter {
 
     void configureRedis(RedisInstance instance);
 
+    /**
+     * Scales a Redis instance (changes node type, shard count, or replicas).
+     * Triggered when memory or availability changes.
+     */
+    void scaleRedis(RedisInstance instance);
+
+    /**
+     * Modifies Redis configuration (TLS, encryption, persistence settings).
+     * Triggered when non-topology fields change.
+     */
+    void modifyRedis(RedisInstance instance);
+
     boolean checkHealth(RedisInstance instance);
 
     String providerName();

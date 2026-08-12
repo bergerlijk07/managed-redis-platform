@@ -103,6 +103,7 @@ The API is the customer-facing contract. It exposes the **platform model**, neve
 **Endpoints:**
 ```
 POST   /v1/redis-instances         → 202 Accepted + operationId
+PATCH  /v1/redis-instances/{id}    → 202 Accepted + operationId (scale/modify)
 GET    /v1/redis-instances/{id}    → instance state + endpoint
 GET    /v1/redis-instances         → list (tenant-scoped)
 DELETE /v1/redis-instances/{id}    → 202 Accepted + operationId
@@ -196,7 +197,10 @@ Select highest score
 Provisioning as a **durable state machine** — NOT a giant function:
 
 ```
-VALIDATING → ALLOCATING → NETWORK_SETUP → STORAGE_SETUP → DEPLOYING → CONFIGURING → HEALTH_CHECK → READY
+Create:  VALIDATING → ALLOCATING → NETWORK_SETUP → STORAGE_SETUP → DEPLOYING → CONFIGURING → HEALTH_CHECK → READY
+Scale:   SCALING → HEALTH_CHECK → READY
+Modify:  MODIFYING → HEALTH_CHECK → READY
+Delete:  DELETING → DELETE_NETWORK → DELETE_STORAGE → DELETE_COMPLETE
 ```
 
 **Why not a single function?**

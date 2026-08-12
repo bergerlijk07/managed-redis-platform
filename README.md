@@ -83,6 +83,31 @@ curl http://localhost:8080/v1/operations/op-e5f6g7h8
 curl -H "X-Tenant-ID: acme-corp" http://localhost:8080/v1/redis-instances
 ```
 
+### Scale or Update an Instance
+
+```bash
+# Scale up memory (triggers topology re-calculation)
+curl -X PATCH http://localhost:8080/v1/redis-instances/redis-a1b2c3d4 \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: acme-corp" \
+  -d '{ "memory": "200Gi" }'
+
+# Modify configuration
+curl -X PATCH http://localhost:8080/v1/redis-instances/redis-a1b2c3d4 \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: acme-corp" \
+  -d '{ "redisVersion": "8.x", "tls": true }'
+```
+
+Response:
+```json
+{
+  "id": "redis-a1b2c3d4",
+  "operationId": "op-x9y8z7w6",
+  "status": "SCALING"
+}
+```
+
 ### Delete an Instance
 
 ```bash
@@ -95,6 +120,7 @@ curl -X DELETE -H "X-Tenant-ID: acme-corp" \
 | Method | Endpoint | Description | Response |
 |--------|----------|-------------|----------|
 | `POST` | `/v1/redis-instances` | Create managed Redis | 202 Accepted |
+| `PATCH` | `/v1/redis-instances/{id}` | Scale or modify instance | 202 Accepted |
 | `GET` | `/v1/redis-instances` | List instances (tenant-scoped) | 200 OK |
 | `GET` | `/v1/redis-instances/{id}` | Get instance details | 200 OK |
 | `DELETE` | `/v1/redis-instances/{id}` | Request deletion | 202 Accepted |

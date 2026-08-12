@@ -38,10 +38,13 @@ import software.amazon.awssdk.services.elasticache.model.CacheSubnetGroupAlready
 import software.amazon.awssdk.services.elasticache.model.CacheSubnetGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.CreateCacheSubnetGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.DecreaseReplicaCountRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteCacheSubnetGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsResponse;
+import software.amazon.awssdk.services.elasticache.model.IncreaseReplicaCountRequest;
+import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroupNotFoundException;
 import software.amazon.awssdk.services.route53.Route53Client;
@@ -296,6 +299,107 @@ public class AWSCloudProvider implements CloudProviderAdapter {
 
         // Delete auth token from Secrets Manager
         deleteAuthToken(instance);
+    }
+
+    // ========== Scaling ==========
+
+    @Override
+    public void scaleRedis(RedisInstance instance) {
+        String rgId = replicationGroupId(instance.getId());
+        log.info("AWS: Scaling replication group {}: newNodeType={}, newShards={}",
+                rgId, instance.getInstanceType(), instance.getShards());
+
+        if (!replicationGroupExists(rgId)) {
+            throw new IllegalStateException("Cannot scale: replication group " + rgId + " does not exist");
+        }
+
+        // Vertical scaling: change node type
+        ModifyReplicationGroupRequest.Builder modifyRequest = ModifyReplicationGroupRequest.builder()
+                .replicationGroupId(rgId)
+                .cacheNodeType(instance.getInstanceType() != null ? instance.getInstanceType() : "cache.r7g.xlarge")
+                .applyImmediately(true);
+
+        elastiCacheClient.modifyReplicationGroup(modifyRequest.build());
+        log.info("AWS: Vertical scaling initiated for {} → {}", rgId, instance.getInstanceType());
+
+        // Horizontal scaling: change shard count if needed
+        // Note: ElastiCache requires separate API calls for increasing/decreasing shards
+        try {
+            DescribeReplicationGroupsResponse resp = elastiCacheClient.describeReplicationGroups(
+                    DescribeReplicationGroupsRequest.builder()
+                            .replicationGroupId(rgId)
+                            .build());
+
+            if (!resp.replicationGroups().isEmpty()) {
+                int currentShards = resp.replicationGroups().get(0).nodeGroups().size();
+                int desiredShards = instance.getShards();
+
+                if (desiredShards > currentShards) {
+                    elastiCacheClient.increaseReplicaCount(
+                            IncreaseReplicaCountRequest.builder()
+                                    .replicationGroupId(rgId)
+                                    .newReplicaCount(instance.getReplicasPerShard())
+                                    .applyImmediately(true)
+                                    .build());
+                    log.info("AWS: Horizontal scale-out initiated: {} → {} shards", currentShards, desiredShards);
+                } else if (desiredShards < currentShards) {
+                    elastiCacheClient.decreaseReplicaCount(
+                            DecreaseReplicaCountRequest.builder()
+                                    .replicationGroupId(rgId)
+                                    .newReplicaCount(instance.getReplicasPerShard())
+                                    .applyImmediately(true)
+                                    .build());
+                    log.info("AWS: Horizontal scale-in initiated: {} → {} shards", currentShards, desiredShards);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("AWS: Horizontal scaling adjustment failed for {}: {}", rgId, e.getMessage());
+        }
+    }
+
+    // ========== Modify ==========
+
+    @Override
+    public void modifyRedis(RedisInstance instance) {
+        String rgId = replicationGroupId(instance.getId());
+        log.info("AWS: Modifying replication group {}: tls={}, persistence={}, version={}",
+                rgId, instance.isTlsEnabled(), instance.isPersistenceEnabled(), instance.getRedisVersion());
+
+        if (!replicationGroupExists(rgId)) {
+            throw new IllegalStateException("Cannot modify: replication group " + rgId + " does not exist");
+        }
+
+        ModifyReplicationGroupRequest.Builder modifyRequest = ModifyReplicationGroupRequest.builder()
+                .replicationGroupId(rgId)
+                .applyImmediately(true);
+
+        // Engine version upgrade
+        if (instance.getRedisVersion() != null) {
+            modifyRequest.engineVersion(resolveEngineVersion(instance.getRedisVersion()));
+        }
+
+        // Snapshot/persistence settings
+        if (instance.isPersistenceEnabled()) {
+            modifyRequest.snapshotRetentionLimit(7);
+            modifyRequest.snapshotWindow("03:00-05:00");
+        } else {
+            modifyRequest.snapshotRetentionLimit(0);
+        }
+
+        // Transit encryption (TLS) - note: can only be enabled, not disabled on existing clusters
+        if (instance.isTlsEnabled()) {
+            modifyRequest.transitEncryptionEnabled(true);
+            modifyRequest.transitEncryptionMode("required");
+        }
+
+        // Multi-AZ
+        modifyRequest.multiAZEnabled(instance.getAvailabilityZonesList().size() > 1);
+
+        // Automatic failover
+        modifyRequest.automaticFailoverEnabled(instance.getReplicasPerShard() > 0);
+
+        elastiCacheClient.modifyReplicationGroup(modifyRequest.build());
+        log.info("AWS: Modification initiated for {}", rgId);
     }
 
     // ========== Configuration ==========

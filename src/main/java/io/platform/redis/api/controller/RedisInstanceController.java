@@ -176,6 +176,106 @@ public class RedisInstanceController {
     }
 
     /**
+     * PATCH /v1/redis-instances/:id
+     * Updates/scales an existing Redis instance.
+     * Only provided fields are modified. Triggers re-reconciliation.
+     */
+    @PatchMapping("/{id}")
+    public ResponseEntity<?> update(
+            @PathVariable String id,
+            @Valid @RequestBody UpdateRedisRequest request,
+            @RequestHeader(value = "X-Tenant-ID", defaultValue = "default") String tenantId,
+            @RequestHeader(value = "X-Request-ID", required = false) String requestId) {
+
+        MDC.put("tenantId", tenantId);
+        MDC.put("requestId", requestId != null ? requestId : UUID.randomUUID().toString());
+
+        return instanceRepository.findById(id)
+            .filter(inst -> inst.getTenantId().equals(tenantId))
+            .map(instance -> {
+                // Only update fields that are provided (non-null)
+                boolean scaled = false;
+                boolean modified = false;
+
+                if (request.memory() != null && !request.memory().equals(instance.getMemory())) {
+                    instance.setMemory(request.memory());
+                    // Re-resolve topology with new memory
+                    ResolvedTopology topology = policyEngine.resolveTopology(instance);
+                    instance.setShards(topology.shards());
+                    instance.setReplicasPerShard(topology.replicasPerShard());
+                    instance.setInstanceType(topology.instanceType());
+                    instance.setStorageSize(topology.storageSize());
+                    instance.setAvailabilityZonesList(topology.availabilityZones());
+                    scaled = true;
+                }
+
+                if (request.redisVersion() != null && !request.redisVersion().equals(instance.getRedisVersion())) {
+                    instance.setRedisVersion(request.redisVersion());
+                    modified = true;
+                }
+
+                if (request.persistence() != null && request.persistence() != instance.isPersistenceEnabled()) {
+                    instance.setPersistenceEnabled(request.persistence());
+                    modified = true;
+                }
+
+                if (request.networkAccess() != null) {
+                    NetworkAccess newAccess = parseNetworkAccess(request.networkAccess());
+                    if (newAccess != instance.getNetworkAccess()) {
+                        instance.setNetworkAccess(newAccess);
+                        modified = true;
+                    }
+                }
+
+                if (request.encryptionAtRest() != null && request.encryptionAtRest() != instance.isEncryptionAtRest()) {
+                    instance.setEncryptionAtRest(request.encryptionAtRest());
+                    modified = true;
+                }
+
+                if (request.tls() != null && request.tls() != instance.isTlsEnabled()) {
+                    instance.setTlsEnabled(request.tls());
+                    modified = true;
+                }
+
+                if (request.availability() != null) {
+                    AvailabilityMode newMode = parseAvailability(request.availability());
+                    if (newMode != instance.getAvailabilityMode()) {
+                        instance.setAvailabilityMode(newMode);
+                        // Re-resolve topology for new availability
+                        ResolvedTopology topology = policyEngine.resolveTopology(instance);
+                        instance.setShards(topology.shards());
+                        instance.setReplicasPerShard(topology.replicasPerShard());
+                        instance.setAvailabilityZonesList(topology.availabilityZones());
+                        scaled = true;
+                    }
+                }
+
+                if (!scaled && !modified) {
+                    return ResponseEntity.ok(new CreateRedisResponse(id, "", instance.getActualStatus().name()));
+                }
+
+                // Mark instance as needing reconciliation
+                instance.setActualStatus(scaled ? ResourceStatus.SCALING : ResourceStatus.MODIFYING);
+                instanceRepository.save(instance);
+
+                // Create operation to track the update
+                String operationId = "op-" + UUID.randomUUID().toString().substring(0, 8);
+                OperationType opType = scaled ? OperationType.SCALE : OperationType.MODIFY;
+                Operation operation = Operation.createNew(operationId, id, tenantId, opType);
+                operation.setPhase(scaled ? WorkflowPhase.SCALING : WorkflowPhase.MODIFYING);
+                operationRepository.save(operation);
+
+                log.info("Redis instance update requested: id={}, scaled={}, modified={}, opType={}",
+                    id, scaled, modified, opType);
+
+                String status = scaled ? "SCALING" : "MODIFYING";
+                return ResponseEntity.accepted()
+                    .body(new CreateRedisResponse(id, operationId, status));
+            })
+            .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
      * DELETE /v1/redis-instances/:id
      * Marks desired state as DELETED. Actual deletion is async.
      */

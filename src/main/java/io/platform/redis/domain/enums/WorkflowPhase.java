@@ -10,6 +10,8 @@ public enum WorkflowPhase {
     VALIDATING_HEALTH,
     READY,
     FAILED,
+    SCALING,
+    MODIFYING,
     DELETING,
     DELETE_NETWORK,
     DELETE_STORAGE,

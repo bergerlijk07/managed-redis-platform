@@ -5,6 +5,7 @@ public enum OperationType {
     UPGRADE,
     DELETE,
     SCALE,
+    MODIFY,
     RESTORE,
     ROLLBACK
 }

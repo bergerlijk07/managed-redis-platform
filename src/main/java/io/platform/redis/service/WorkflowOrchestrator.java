@@ -78,7 +78,12 @@ public class WorkflowOrchestrator {
                 operation.markFailed("Phase execution failed");
                 instance.setActualStatus(ResourceStatus.FAILED);
             } else {
-                instance.setActualStatus(ResourceStatus.PROVISIONING);
+                // In-progress states
+                if (operation.getPhase() == WorkflowPhase.SCALING || operation.getPhase() == WorkflowPhase.MODIFYING) {
+                    // Keep SCALING/MODIFYING status while in progress
+                } else {
+                    instance.setActualStatus(ResourceStatus.PROVISIONING);
+                }
             }
 
             instanceRepository.save(instance);
@@ -110,6 +115,8 @@ public class WorkflowOrchestrator {
             case DEPLOYING -> handleDeploying(instance);
             case CONFIGURING -> handleConfiguring(instance);
             case VALIDATING_HEALTH -> handleHealthCheck(instance);
+            case SCALING -> handleScaling(instance);
+            case MODIFYING -> handleModifying(instance);
             case DELETING -> handleDeleting(instance);
             case DELETE_NETWORK -> handleDeleteNetwork(instance);
             case DELETE_STORAGE -> handleDeleteStorage(instance);
@@ -222,5 +229,32 @@ public class WorkflowOrchestrator {
         log.info("Cleaning up storage resources");
         cloudAdapter.deleteStorage(instance);
         return WorkflowPhase.DELETE_COMPLETE;
+    }
+
+    // ===== Scaling & Modification Phase Handlers =====
+
+    private WorkflowPhase handleScaling(RedisInstance instance) {
+        log.info("Scaling Redis instance: id={}, newMemory={}, newShards={}, newInstanceType={}",
+            instance.getId(), instance.getMemory(), instance.getShards(), instance.getInstanceType());
+
+        // Scale the cloud resources (ElastiCache node type + shard count)
+        cloudAdapter.scaleRedis(instance);
+
+        // Update the CRD on Kubernetes so the operator is aware of new topology
+        // (handled via KubernetesOperatorService in the reconciler)
+
+        // After scaling, validate health before marking READY
+        return WorkflowPhase.VALIDATING_HEALTH;
+    }
+
+    private WorkflowPhase handleModifying(RedisInstance instance) {
+        log.info("Modifying Redis instance: id={}, version={}, tls={}, persistence={}",
+            instance.getId(), instance.getRedisVersion(), instance.isTlsEnabled(), instance.isPersistenceEnabled());
+
+        // Modify cloud resources (ElastiCache configuration)
+        cloudAdapter.modifyRedis(instance);
+
+        // After modification, validate health before marking READY
+        return WorkflowPhase.VALIDATING_HEALTH;
     }
 }
